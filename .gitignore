@@ -5,3 +5,7 @@
 .Rproj
 *.Rproj
 .idea/*
+test/*
+test-dev.R
+model-output/hubcomp-examp/2021-03-07-hubcomp-examp.csv
+model-output/hubcomp-examp/2021-03-07-hubcomp-examp.parquet
