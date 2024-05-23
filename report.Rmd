@@ -1,0 +1,249 @@
+---
+output: github_document
+---
+
+<!-- README.md is generated from README.Rmd. Please edit that file -->
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+```{r, message=FALSE}
+library(dplyr)
+```
+
+There's a lot going on here. I've done some experiments which can be found in this [fork and branch of `example-complex-scenario-hub`](https://github.com/annakrystalli/example-complex-scenario-hub/tree/test-dataset-schema). I made a few changes to ensure files conformed to hub standards adn could be validated.
+
+All the code can be found in `report.Rmd`.
+
+## Differences in reading csvs between arrow and readr
+
+The first issue appears to be a result of how `arrow` reads csvs, especially compared to `readr`.
+
+Below I create two csvs, both with `US` removed from the `location` column. I then write them out using `arrow` and `readr`.
+
+```{r}
+dir.create("test", showWarnings = FALSE)
+
+arrow::read_csv_arrow(
+  "model-output/HUBuni-simexamp/2021-03-07-HUBuni-simexamp.csv"
+) %>%
+  filter(location != "US") %>%
+  slice(1:1000) %>%
+  arrow::write_csv_arrow(file.path("test", "2021-03-07-HUBuni-simexamp-arrow.csv"))
+
+readr::read_csv("model-output/HUBuni-simexamp/2021-03-07-HUBuni-simexamp.csv") %>%
+  filter(location != "US") %>%
+  slice(1:1000) %>%
+  readr::write_csv(file.path("test", "2021-03-07-HUBuni-simexamp-readr.csv"))
+```
+
+
+
+CSVs can often be difficult to work with because they don't explicitly encapsulate a schema like e.g. parquet files do.
+
+Looking at the structure of the two files created:
+
+##### `readr` csv
+
+```
+origin_date,scenario_id,location,target,horizon,output_type,output_type_id,value
+2021-03-07,A-2021-03-05,02,inc death,1,quantile,0.01,0
+2021-03-07,A-2021-03-05,02,inc death,1,quantile,0.025,0
+2021-03-07,A-2021-03-05,02,inc death,1,quantile,0.05,1
+2021-03-07,A-2021-03-05,02,inc death,1,quantile,0.1,1
+2021-03-07,A-2021-03-05,02,inc death,1,quantile,0.15,2
+```
+
+
+##### `arrow` csv
+
+```
+"origin_date","scenario_id","location","target","horizon","output_type","output_type_id","value"
+2021-03-07,"A-2021-03-05","02","inc death",1,"quantile",0.01,0
+2021-03-07,"A-2021-03-05","02","inc death",1,"quantile",0.025,0
+2021-03-07,"A-2021-03-05","02","inc death",1,"quantile",0.05,1
+2021-03-07,"A-2021-03-05","02","inc death",1,"quantile",0.1,1
+2021-03-07,"A-2021-03-05","02","inc death",1,"quantile",0.15,2
+```
+you'd think `arrow` had done a better job of encoding the character nature of the `location` column. 
+
+However, it seems that `arrow` does a worse job of reading in the `location` column, regardless of what function was used to write the file.
+
+`arrow` does NOT correctly read in location, regardless of what function was used to write the file, 
+
+```{r}
+arrow::read_csv_arrow(
+  file.path("test", "2021-03-07-HUBuni-simexamp-arrow.csv")
+)
+arrow::read_csv_arrow(
+  file.path("test", "2021-03-07-HUBuni-simexamp-readr.csv")
+)
+```
+
+
+while `readr` correctly reads in `location` regardless of what function was used to write the file.
+
+```{r}
+readr::read_csv(file.path("test", "2021-03-07-HUBuni-simexamp-readr.csv"))
+readr::read_csv(file.path("test", "2021-03-07-HUBuni-simexamp-arrow.csv"))
+```
+
+### Why is this relevant?
+
+I suspect what is going on in the case of hub transformations and the errors @bsweger is experiencing is that arrow might be converting `location` to integers on read (in at least one file where there is no "US" value?) and then writing them out as integers as well. 
+
+I have worried from the beginning about issues with the transformations if they are not schema aware and I think this may be an example of that. I think the best way to handle this is to make sure that the schema is preserved when writing out the parquet files and test for it as well.
+
+## Differences in how schemas are applied to datasets between `csv` and `parquet`
+
+Having said all that, there seem to be additional issues with arrow datasets.
+All of this reminds of [edge cases I've come across before](https://github.com/Infectious-Disease-Modeling-Hubs/hubData/issues/9) and even reached out to the arrow team about but we were never able to reproduce the issue when building up from smaller examples... I think we may have just figured it out!
+
+The problem seems to be parquet files and that applying the schema does not appear to work in the same way as for csv files.
+
+### Create a csv file with integer `location` column
+
+```{r}
+readr::read_csv("model-output/hubcomp_examp/2021-03-07.csv") %>%
+  filter(location != "US") %>%
+  mutate(location = as.integer(location)) %>%
+  readr::write_csv(
+    file.path(
+      "model-output/hubcomp-examp",
+      "2021-03-07-hubcomp-examp.csv"
+    )
+  )
+```
+
+### Create a parquet file with integer `location` column
+
+```{r}
+readr::read_csv("model-output/hubcomp_examp/2021-03-07.csv") %>%
+  filter(location != "US") %>%
+  mutate(location = as.integer(location)) %>%
+  arrow::write_parquet(
+    file.path(
+      "model-output/hubcomp-examp",
+      "2021-03-07-hubcomp-examp.parquet"
+    )
+  )
+```
+
+## Connect to whole hub
+
+Dataset opens but we get the familiar error when filtering
+
+```{r, error = TRUE}
+hubData::connect_hub(".")
+
+hubData::connect_hub(".") %>%
+  filter(location == "US") %>%
+  hubData::collect_hub()
+```
+
+
+### Connect to parquet only
+
+Same error as above
+
+```{r, error = TRUE}
+hubData::connect_hub(".", file_format = "parquet")
+
+hubData::connect_hub(".", file_format = "parquet") %>%
+  filter(location == "US") %>%
+  hubData::collect_hub()
+```
+
+### Connect to csv only
+
+Works!
+
+```{r}
+hubData::connect_hub(".", file_format = "csv")
+
+hubData::connect_hub(".", file_format = "csv") %>%
+  filter(location == "US") %>%
+  hubData::collect_hub()
+```
+
+
+I suspect this is most likely a result of the fact that the schema is supplied differently when opening csv vs parquet datasets (including under the hood in `connect_hub()`).
+
+
+```{r}
+config_tasks <- hubUtils::read_config(".", "tasks")
+schema <- hubData::create_hub_schema(
+  config_tasks,
+  partitions = list(model_id = arrow::utf8())
+)
+```
+
+In csv datasets we use argument `col_types` to specify the schema:
+
+```{r}
+arrow::open_dataset(
+  "model-output",
+  format = "csv",
+  partitioning = "model_id",
+  col_types = schema,
+  unify_schemas = TRUE,
+  strings_can_be_null = TRUE,
+  factory_options = list(exclude_invalid_files = TRUE)
+) %>%
+  filter(location == "US") %>%
+  hubData::collect_hub()
+```
+
+while in parquet datasets we use argument `schema` to specify the schema:
+
+
+```{r, error=TRUE}
+arrow::open_dataset(
+  "model-output",
+  format = "parquet",
+  partitioning = "model_id",
+  schema = schema,
+  unify_schemas = TRUE,
+  factory_options = list(exclude_invalid_files = TRUE)
+) %>%
+  filter(location == "US") %>%
+  hubData::collect_hub()
+```
+
+This does sort of beg the question of what is the purpose of schemas for parquet files if they are not applied in the same way as for csv files. I think this is a question for the arrow team.
+
+
+## The importance of validation
+
+Note also that none of these files would pass validation. Given the brittleness of arrow, validation of data on the way in is very important. It seems like a lot of this issues are coming from hubs that have not been fully validated or have been transformed in a non schema aware way. There is a limit to what can be done to fix issues with the data at access time. It seems like this is especially important for parquet files, which effectively include a schema as part of file metadata.
+
+```{r}
+hubValidations::validate_submission(
+  hub_path = ".",
+  file_path = file.path(
+    "hubcomp-examp",
+    "2021-03-07-hubcomp-examp.parquet"
+  ),
+  skip_submit_window_check = TRUE
+)
+
+hubValidations::validate_submission(
+  hub_path = ".",
+  file_path = file.path(
+    "hubcomp-examp",
+    "2021-03-07-hubcomp-examp.csv"
+  ),
+  skip_submit_window_check = TRUE
+)
+```
+
+## Summary
+
+- Any transformations should be schema aware and we should have integrity tests to ensure this.
+- when setting up hubs from historic data we should indeed try to run validations on files (which may bump up the priority of https://github.com/Infectious-Disease-Modeling-Hubs/hubValidations/issues/83 and  https://github.com/Infectious-Disease-Modeling-Hubs/hubverse-actions/issues/12). This could help in
+identify potential issues earlier on. Having said that, that might not always be possible. In such cases however, I don't think we can expect downstream data access functions to work seamlessly on data that has not been validated.
+- Maybe we should just plug everything into a duckdb database!
